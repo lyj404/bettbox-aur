@@ -86,4 +86,4 @@ jobs:
           git config user.name "$AUR_USERNAME"
           git add PKGBUILD .SRCINFO
           git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
-          git push origin main
+          git push origin master

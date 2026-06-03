@@ -40,3 +40,9 @@ sudo pacman -S libkeybinder3
 
 - [上游项目](https://github.com/appshubcc/Bettbox)
 - [AUR 页面](https://aur.archlinux.org/packages/bettbox-bin)
+
+## 许可证
+
+本项目（AUR 打包脚本）基于 [Apache License 2.0](LICENSE) 许可。
+
+注意：被打包的 Bettbox 软件本身基于 [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html) 许可。

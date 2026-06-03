@@ -1,0 +1,89 @@
+name: Update AUR Package
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new release
+        id: check
+        run: |
+          latest=$(curl -s https://api.github.com/repos/appshubcc/Bettbox/releases/latest | jq -r '.tag_name')
+          latest_ver="${latest#v}"
+
+          # 跳过预发布版本
+          if [[ "$latest_ver" == *-* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current_ver=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          if [[ "$latest_ver" == "$current_ver" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "version=$latest_ver" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update PKGBUILD
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          ver="${{ steps.check.outputs.version }}"
+          base="https://github.com/appshubcc/Bettbox/releases/download/v${ver}"
+
+          sha_amd64=$(curl -sL "${base}/Bettbox-${ver}-linux-amd64.deb" | sha256sum | cut -d' ' -f1)
+          sha_arm64=$(curl -sL "${base}/Bettbox-${ver}-linux-arm64.deb" | sha256sum | cut -d' ' -f1)
+
+          sed -i "s|^pkgver=.*|pkgver=${ver}|" PKGBUILD
+          sed -i "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
+          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${sha_amd64}')|" PKGBUILD
+          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${sha_arm64}')|" PKGBUILD
+
+      - name: Generate .SRCINFO
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          bash .github/scripts/gen-srcinfo.sh > .SRCINFO
+
+      - name: Commit and push to GitHub
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
+          git push
+
+      - name: Push to AUR
+        if: steps.check.outputs.skip != 'true'
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+        run: |
+          # 配置 SSH
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+          cat >> ~/.ssh/config <<EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+          EOF
+
+          # 克隆 AUR 仓库并推送
+          git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox
+          cp PKGBUILD .SRCINFO /tmp/aur-bettbox/
+          cd /tmp/aur-bettbox
+          git config user.email "${AUR_USERNAME}@users.noreply.github.com"
+          git config user.name "$AUR_USERNAME"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
+          git push origin master

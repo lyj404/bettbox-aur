@@ -57,12 +57,23 @@ jobs:
 
       - name: Update PKGBUILD
         if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+          NEW_VER: ${{ steps.check.outputs.version }}
         run: |
-          ver="${{ steps.check.outputs.version }}"
-          base="https://github.com/appshubcc/Bettbox/releases/download/v${ver}"
+          set -euo pipefail
 
-          sha_amd64=$(curl -sL "${base}/Bettbox-${ver}-linux-amd64.deb" | sha256sum | cut -d' ' -f1)
-          sha_arm64=$(curl -sL "${base}/Bettbox-${ver}-linux-arm64.deb" | sha256sum | cut -d' ' -f1)
+          sha_amd64=$(gh release view "$TAG" \
+            --repo appshubcc/Bettbox \
+            --json assets \
+            --jq '[.assets[] | select(.name | endswith("linux-amd64.deb")) | .digest] | first' | \
+            sed 's/^sha256://')
+          sha_arm64=$(gh release view "$TAG" \
+            --repo appshubcc/Bettbox \
+            --json assets \
+            --jq '[.assets[] | select(.name | endswith("linux-arm64.deb")) | .digest] | first' | \
+            sed 's/^sha256://')
 
           sed -i "s|^pkgver=.*|pkgver=${NEW_VER}|" PKGBUILD
           sed -i "s|^pkgrel=.*|pkgrel=1|" PKGBUILD

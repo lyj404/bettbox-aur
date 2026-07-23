@@ -58,7 +58,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
+          git add PKGBUILD .SRCINFO restart-bettbox.hook
           git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
           git push
 
@@ -82,10 +82,10 @@ jobs:
 
           # 克隆 AUR 仓库并推送
           git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox
-          cp PKGBUILD .SRCINFO /tmp/aur-bettbox/
+          cp PKGBUILD .SRCINFO restart-bettbox.hook /tmp/aur-bettbox/
           cd /tmp/aur-bettbox
           git config user.email "${AUR_USERNAME}@users.noreply.github.com"
           git config user.name "$AUR_USERNAME"
-          git add PKGBUILD .SRCINFO
+          git add PKGBUILD .SRCINFO restart-bettbox.hook
           git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
           git push origin master

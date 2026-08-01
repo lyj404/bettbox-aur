@@ -16,34 +16,66 @@ jobs:
 
       - name: Check for new release
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          latest=$(curl -s https://api.github.com/repos/appshubcc/Bettbox/releases/latest | jq -r '.tag_name')
-          latest_ver="${latest#v}"
+          set -euo pipefail
 
-          # 跳过预发布版本
-          if [[ "$latest_ver" == *-* ]]; then
+          latest_tag=""
+          while IFS= read -r tag; do
+            case "$tag" in *-*) continue ;; esac
+            asset_count=$(gh release view "$tag" \
+              --repo appshubcc/Bettbox \
+              --json assets \
+              --jq '[.assets[] | select(.name | test("linux-amd64\\.deb$"))] | length')
+            if [ "$asset_count" -gt 0 ]; then
+              latest_tag="$tag"
+              break
+            fi
+          done < <(gh release list \
+            --repo appshubcc/Bettbox \
+            --limit 30 \
+            --json tagName,isDraft \
+            --jq '.[] | select(.isDraft == false) | .tagName')
+
+          if [ -z "$latest_tag" ]; then
+            echo "No upstream stable releases found"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          current_ver=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          latest_ver="${latest_tag#v}"
+          current_ver=$(sed -n 's/^pkgver=//p' PKGBUILD)
+
           if [[ "$latest_ver" == "$current_ver" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "version=$latest_ver" >> "$GITHUB_OUTPUT"
+            echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update PKGBUILD
         if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+          NEW_VER: ${{ steps.check.outputs.version }}
         run: |
-          ver="${{ steps.check.outputs.version }}"
-          base="https://github.com/appshubcc/Bettbox/releases/download/v${ver}"
+          set -euo pipefail
 
-          sha_amd64=$(curl -sL "${base}/Bettbox-${ver}-linux-amd64.deb" | sha256sum | cut -d' ' -f1)
-          sha_arm64=$(curl -sL "${base}/Bettbox-${ver}-linux-arm64.deb" | sha256sum | cut -d' ' -f1)
+          sha_amd64=$(gh release view "$TAG" \
+            --repo appshubcc/Bettbox \
+            --json assets \
+            --jq '[.assets[] | select(.name | endswith("linux-amd64.deb")) | .digest] | first' | \
+            sed 's/^sha256://')
+          sha_arm64=$(gh release view "$TAG" \
+            --repo appshubcc/Bettbox \
+            --json assets \
+            --jq '[.assets[] | select(.name | endswith("linux-arm64.deb")) | .digest] | first' | \
+            sed 's/^sha256://')
 
-          sed -i "s|^pkgver=.*|pkgver=${ver}|" PKGBUILD
+          sed -i "s|^pkgver=.*|pkgver=${NEW_VER}|" PKGBUILD
           sed -i "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
           sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${sha_amd64}')|" PKGBUILD
           sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${sha_arm64}')|" PKGBUILD

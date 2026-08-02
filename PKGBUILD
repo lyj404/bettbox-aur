@@ -1,6 +1,6 @@
 # Maintainer: lyj <lyj404@gmail.com>
 pkgname=bettbox-bin
-pkgver=1.18.5
+pkgver=1.18.8
 pkgrel=1
 pkgdesc="基于 Mihomo（Clash.Meta 内核）的多平台代理客户端"
 arch=('x86_64' 'aarch64')

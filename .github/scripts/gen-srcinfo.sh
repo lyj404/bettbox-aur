@@ -28,12 +28,20 @@ for o in "${options[@]}"; do
   echo "	option = $o"
 done
 
+for s in "${source[@]}"; do
+  echo "	source = $s"
+done
+
 for s in "${source_x86_64[@]}"; do
   echo "	source_x86_64 = $s"
 done
 
 for s in "${source_aarch64[@]}"; do
   echo "	source_aarch64 = $s"
+done
+
+for s in "${sha256sums[@]}"; do
+  echo "	sha256sums = $s"
 done
 
 for s in "${sha256sums_x86_64[@]}"; do

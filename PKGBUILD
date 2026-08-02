@@ -12,10 +12,12 @@ depends=(
   'libkeybinder3'
 )
 options=('!strip' '!debug')
+source=("restart-bettbox.hook")
 source_x86_64=("https://github.com/appshubcc/Bettbox/releases/download/v${pkgver}/Bettbox-${pkgver}-linux-amd64.deb")
 source_aarch64=("https://github.com/appshubcc/Bettbox/releases/download/v${pkgver}/Bettbox-${pkgver}-linux-arm64.deb")
-sha256sums_x86_64=('e4a290297495cf80e7321626d8b75c406f6bbcbfeec40ee58270787c4edfa2e2')
-sha256sums_aarch64=('341a47121800a4a21ee2f657d386bfbcb6fea36c8751b41d26b0050f39185c0d')
+sha256sums=('9d8b0a54499c9325ed64d987184a229af75c34600ca28afd016dff43ebb53cd0')
+sha256sums_x86_64=('862045d684f0ba6431a558ac87c9df154c9bc7dcea6e8a5b80f1927c7818967b')
+sha256sums_aarch64=('c7e600c962067c1a6749fe44f84c06bc6ded504ceba21b9c19ac8415374abd38')
 
 package() {
   bsdtar -xf data.tar.zst -C "${srcdir}"
@@ -39,4 +41,7 @@ package() {
     install -Dm644 "${srcdir}/usr/share/icons/hicolor/${size}x${size}/apps/Bettbox.png" \
       "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/Bettbox.png"
   done
+
+  # pacman hook: 升级后自动重启 bettbox
+  install -Dm644 -t "${pkgdir}/usr/share/libalpm/hooks/" "${srcdir}/restart-bettbox.hook"
 }

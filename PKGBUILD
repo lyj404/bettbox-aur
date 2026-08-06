@@ -4,7 +4,7 @@ pkgver=1.18.8
 pkgrel=1
 pkgdesc="基于 Mihomo（Clash.Meta 内核）的多平台代理客户端"
 arch=('x86_64' 'aarch64')
-url="https://github.com/lyj404/bettbox-aur"
+url="https://github.com/appshubcc/Bettbox"
 license=('GPL-3.0-or-later')
 depends=(
   'gtk3'

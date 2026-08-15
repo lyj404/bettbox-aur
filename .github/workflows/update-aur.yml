@@ -4,9 +4,19 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+
+concurrency:
+  group: update-aur
+  cancel-in-progress: false
 
 jobs:
-  update:
+  update-version:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -136,21 +146,10 @@ jobs:
             exit 0
           fi
 
+          # 定时路径只处理版本更新；skip=true 时若仍有差异（如 push-modifications 推送 AUR 失败后），
+          # 顺手把手工改动补推到 AUR，.SRCINFO 由本地维护者生成并已提交，无需再现场重算
           if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
-            # 非版本号改动（含 pkgrel 变更）：重新生成 .SRCINFO，保证与 PKGBUILD 一致并通过 AUR 校验
-            docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work archlinux:latest \
-              bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && useradd -m builder && su builder -c "makepkg --printsrcinfo" > .SRCINFO'
-            sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.SRCINFO"
-            cp "$GITHUB_WORKSPACE/.SRCINFO" ./
-            if git diff --quiet -- PKGBUILD .SRCINFO restart-bettbox.hook; then
-              echo "No changes to sync to AUR after regenerating .SRCINFO"
-              exit 0
-            fi
-            if [ "$aur_ver" != "$repo_ver" ]; then
-              title="Update to version ${repo_ver}-${repo_rel}"
-            else
-              title="Sync packaging changes from GitHub"
-            fi
+            title="Sync packaging changes from GitHub"
           else
             title="Update to version ${repo_ver}"
           fi
@@ -199,3 +198,52 @@ jobs:
             git commit -m "Update to version ${{ steps.check.outputs.version }}"
           fi
           git push
+
+  push-modifications:
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure pkgrel changed
+        run: |
+          set -euo pipefail
+
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+
+          # Check there is a diff in PKGBUILD or .SRCINFO
+          git diff "$BEFORE" "$AFTER" -- PKGBUILD .SRCINFO > /dev/null 2>&1 || {
+            echo "Error: no changes to PKGBUILD or .SRCINFO in this push"
+            exit 1
+          }
+
+          # Extract the new pkgrel value from each file
+          pkgrel_pkgbuild=$(git diff "$BEFORE" "$AFTER" -- PKGBUILD | sed -n 's/^+pkgrel=//p')
+          pkgrel_srcinfo=$(git diff "$BEFORE" "$AFTER" -- .SRCINFO | sed -n 's/^+[[:space:]]*pkgrel[[:space:]]*=[[:space:]]*//p')
+
+          # Verify both files modified pkgrel
+          [ -n "$pkgrel_pkgbuild" ] || { echo "Error: pkgrel not modified in PKGBUILD"; exit 1; }
+          [ -n "$pkgrel_srcinfo" ] || { echo "Error: pkgrel not modified in .SRCINFO"; exit 1; }
+
+          # Verify they match
+          [ "$pkgrel_pkgbuild" = "$pkgrel_srcinfo" ] || {
+            echo "Error: pkgrel mismatch - PKGBUILD has '$pkgrel_pkgbuild', .SRCINFO has '$pkgrel_srcinfo'"
+            exit 1
+          }
+
+          echo "pkgrel consistency check passed: pkgrel=$pkgrel_pkgbuild"
+
+      - name: Push to AUR
+        uses: ./.github/actions/push-to-aur
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_KEY }}
+          package-name: bettbox-bin
+          commit-message: ${{ join(github.event.commits.*.message, '\n---\n') }}
+          user-name: ${{ secrets.AUR_USERNAME }}
+          user-email: ${{ secrets.AUR_USERNAME }}@users.noreply.github.com

@@ -85,7 +85,10 @@ jobs:
       - name: Generate .SRCINFO
         if: steps.check.outputs.skip != 'true'
         run: |
-          bash .github/scripts/gen-srcinfo.sh > .SRCINFO
+          docker run --rm -v "$PWD":/work -w /work archlinux:latest \
+            bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && makepkg --printsrcinfo > .SRCINFO'
+          # 容器以 root 运行,需修正文件所有权
+          sudo chown "$(id -u):$(id -g)" .SRCINFO
 
       - name: Commit and push to GitHub
         if: steps.check.outputs.skip != 'true'

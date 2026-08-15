@@ -45,7 +45,9 @@ jobs:
           fi
 
           latest_ver="${latest_tag#v}"
-          current_ver=$(sed -n 's/^pkgver=//p' PKGBUILD)
+          # 以 AUR 上已发布的版本为准，避免推送 AUR 失败后被本仓库的 pkgver 卡住
+          current_ver=$(curl -fsS 'https://aur.archlinux.org/rpc/v5/info?arg[]=bettbox-bin' \
+            | jq -r '.results[0].Version' | sed 's/-[^-]*$//')
 
           if [[ "$latest_ver" == "$current_ver" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"

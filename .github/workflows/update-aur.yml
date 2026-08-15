@@ -85,8 +85,9 @@ jobs:
       - name: Generate .SRCINFO
         if: steps.check.outputs.skip != 'true'
         run: |
+          # makepkg 不允许以 root 运行, 需在容器内创建非 root 用户; 输出由外层 root shell 重定向写入
           docker run --rm -v "$PWD":/work -w /work archlinux:latest \
-            bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && makepkg --printsrcinfo > .SRCINFO'
+            bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && useradd -m builder && su builder -c "makepkg --printsrcinfo" > .SRCINFO'
           # 容器以 root 运行,需修正文件所有权
           sudo chown "$(id -u):$(id -g)" .SRCINFO
 
@@ -138,7 +139,7 @@ jobs:
           if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
             # 非版本号改动（含 pkgrel 变更）：重新生成 .SRCINFO，保证与 PKGBUILD 一致并通过 AUR 校验
             docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work archlinux:latest \
-              bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && makepkg --printsrcinfo > .SRCINFO'
+              bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && useradd -m builder && su builder -c "makepkg --printsrcinfo" > .SRCINFO'
             sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.SRCINFO"
             cp "$GITHUB_WORKSPACE/.SRCINFO" ./
             if git diff --quiet -- PKGBUILD .SRCINFO restart-bettbox.hook; then

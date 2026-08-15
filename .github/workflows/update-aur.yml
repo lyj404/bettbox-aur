@@ -90,21 +90,14 @@ jobs:
           # 容器以 root 运行,需修正文件所有权
           sudo chown "$(id -u):$(id -g)" .SRCINFO
 
-      - name: Commit and push to GitHub
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO restart-bettbox.hook
-          git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
-          git push
-
+      # 先推 AUR 再推 GitHub：若推送 AUR 失败，本仓库保持原样，避免两侧 PKGBUILD 内容不同步
       - name: Push to AUR
-        if: steps.check.outputs.skip != 'true'
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
         run: |
+          set -euo pipefail
+
           # 配置 SSH
           mkdir -p ~/.ssh
           echo "$AUR_SSH_KEY" > ~/.ssh/aur
@@ -117,12 +110,91 @@ jobs:
             User aur
           EOF
 
-          # 克隆 AUR 仓库并推送
+          # 克隆 AUR 仓库用于对比与推送
           git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox
-          cp PKGBUILD .SRCINFO restart-bettbox.hook /tmp/aur-bettbox/
           cd /tmp/aur-bettbox
           git config user.email "${AUR_USERNAME}@users.noreply.github.com"
           git config user.name "$AUR_USERNAME"
+
+          repo_ver=$(sed -n 's/^pkgver=//p' "$GITHUB_WORKSPACE/PKGBUILD")
+          repo_rel=$(sed -n 's/^pkgrel=//p' "$GITHUB_WORKSPACE/PKGBUILD")
+          aur_ver=$(sed -n 's/^pkgver=//p' PKGBUILD)
+          aur_rel=$(sed -n 's/^pkgrel=//p' PKGBUILD)
+
+          # AUR 已领先本仓库时（如上次推送 GitHub 失败），不推送，避免把 AUR 回退
+          if [ "$aur_ver-$aur_rel" != "$repo_ver-$repo_rel" ] && \
+             [ "$(printf '%s\n%s\n' "$aur_ver-$aur_rel" "$repo_ver-$repo_rel" | sort -V | tail -1)" = "$aur_ver-$aur_rel" ]; then
+            echo "AUR ($aur_ver-$aur_rel) is ahead of repo ($repo_ver-$repo_rel), skip to avoid downgrade"
+            exit 0
+          fi
+
+          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/restart-bettbox.hook" ./
+
+          if git diff --quiet -- PKGBUILD .SRCINFO restart-bettbox.hook; then
+            echo "No changes to sync to AUR"
+            exit 0
+          fi
+
+          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
+            # 非版本号改动（含 pkgrel 变更）：重新生成 .SRCINFO，保证与 PKGBUILD 一致并通过 AUR 校验
+            docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work archlinux:latest \
+              bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && makepkg --printsrcinfo > .SRCINFO'
+            sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.SRCINFO"
+            cp "$GITHUB_WORKSPACE/.SRCINFO" ./
+            if git diff --quiet -- PKGBUILD .SRCINFO restart-bettbox.hook; then
+              echo "No changes to sync to AUR after regenerating .SRCINFO"
+              exit 0
+            fi
+            if [ "$aur_ver" != "$repo_ver" ]; then
+              title="Update to version ${repo_ver}-${repo_rel}"
+            else
+              title="Sync packaging changes from GitHub"
+            fi
+          else
+            title="Update to version ${repo_ver}"
+          fi
+
+          # 附上本仓库涉及打包文件的提交记录，提升 AUR 提交的可审计性
+          body=$(git -C "$GITHUB_WORKSPACE" log -20 --format='- %s (%h)' \
+            -- PKGBUILD .SRCINFO restart-bettbox.hook | grep -v '^\- Update to version' || true)
+
           git add PKGBUILD .SRCINFO restart-bettbox.hook
-          git diff --cached --quiet || git commit -m "Update to version ${{ steps.check.outputs.version }}"
+          if [ -n "$body" ]; then
+            git commit -m "$title" -m "$body"
+          else
+            git commit -m "$title"
+          fi
           git push origin master
+
+      - name: Commit and push to GitHub
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 若 AUR 领先（如上次推送 GitHub 失败），以 AUR 为准补回本仓库，保证两侧一致
+          aur_vr=$(sed -n 's/^pkgver=//p' /tmp/aur-bettbox/PKGBUILD)-$(sed -n 's/^pkgrel=//p' /tmp/aur-bettbox/PKGBUILD)
+          repo_vr=$(sed -n 's/^pkgver=//p' PKGBUILD)-$(sed -n 's/^pkgrel=//p' PKGBUILD)
+          if [ "$aur_vr" != "$repo_vr" ] && \
+             [ "$(printf '%s\n%s\n' "$aur_vr" "$repo_vr" | sort -V | tail -1)" = "$aur_vr" ]; then
+            echo "AUR ($aur_vr) is ahead of repo ($repo_vr), syncing GitHub from AUR"
+            cp /tmp/aur-bettbox/PKGBUILD /tmp/aur-bettbox/.SRCINFO /tmp/aur-bettbox/restart-bettbox.hook ./
+            git add PKGBUILD .SRCINFO restart-bettbox.hook
+            git commit -m "Sync from AUR"
+            git push
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO restart-bettbox.hook
+          if git diff --cached --quiet; then
+            echo "No changes to commit on GitHub"
+            exit 0
+          fi
+
+          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
+            git commit -m "Update packaging files"
+          else
+            git commit -m "Update to version ${{ steps.check.outputs.version }}"
+          fi
+          git push

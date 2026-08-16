@@ -9,6 +9,9 @@ on:
       - main
     paths-ignore:
       - '.github/**'
+      - 'README.md'
+      - '.gitignore'
+      - '.gitattributes'
 
 concurrency:
   group: update-aur
@@ -146,9 +149,9 @@ jobs:
           git config user.email "${AUR_USERNAME}@users.noreply.github.com"
           git config user.name "$AUR_USERNAME"
 
-          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/restart-bettbox.hook" ./
+          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/restart-bettbox.hook" ./
 
-          if git diff --quiet -- PKGBUILD .SRCINFO restart-bettbox.hook; then
+          if git diff --quiet -- PKGBUILD .SRCINFO LICENSE restart-bettbox.hook; then
             echo "No changes to sync to AUR"
             exit 0
           fi
@@ -156,7 +159,7 @@ jobs:
           # 步骤已由 `skip != 'true'` 门控，走到这里必有版本更新
           title="Update to version $(sed -n 's/^pkgver=//p' PKGBUILD)"
 
-          git add PKGBUILD .SRCINFO restart-bettbox.hook
+          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook
           git commit -m "$title"
           git push origin master
 
@@ -168,7 +171,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # AUR 差异已在 Fetch AUR state 失败，此处只提交本仓库改动
-          git add PKGBUILD .SRCINFO restart-bettbox.hook
+          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook
           if git diff --cached --quiet; then
             echo "No changes to commit on GitHub"
             exit 0
@@ -223,16 +226,62 @@ jobs:
 
             echo "PKGBUILD / .SRCINFO consistency check passed"
           else
-            # 非打包文件改动（LICENSE/README/hook 等）：无需重新生成 .SRCINFO，
-            # push-to-aur 会全量 rsync 推送，保持 AUR 与仓库一致
+            # 非打包文件改动（README 等）：无需重新生成 .SRCINFO，
+            # 仅同步 AUR 实际存在的文件（PKGBUILD/.SRCINFO/LICENSE/restart-bettbox.hook）
             echo "No changes to PKGBUILD or .SRCINFO, skipping validation"
           fi
 
-      - name: Push to AUR
-        uses: ./.github/actions/push-to-aur
-        with:
-          ssh-private-key: ${{ secrets.AUR_SSH_KEY }}
-          package-name: bettbox-bin
-          commit-message: ${{ join(github.event.commits.*.message, '\n---\n') }}
-          user-name: ${{ secrets.AUR_USERNAME }}
-          user-email: ${{ secrets.AUR_USERNAME }}@users.noreply.github.com
+      - name: Push commits to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+        run: |
+          set -euo pipefail
+
+          # 配置 SSH
+          mkdir -p -m 0700 ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+
+          # 克隆一次 AUR 仓库，逐 commit 累积推送
+          rm -rf /tmp/aur-bettbox-bin
+          git clone "ssh://aur@aur.archlinux.org/bettbox-bin.git" /tmp/aur-bettbox-bin
+          cd /tmp/aur-bettbox-bin
+          git config user.name "$AUR_USERNAME"
+          git config user.email "${AUR_USERNAME}@users.noreply.github.com"
+
+          # 每个 GitHub commit 各自作为一个 AUR commit 同步，一一对应
+          # 用 git rev-list --reverse 在本地仓库取正序（旧→新）commit，避免推送到旧状态
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+          # 分支新建（全是 0）或无提交时退出
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
+            echo "Branch created or empty push; skipping AUR sync"
+            exit 0
+          fi
+
+          cd "$GITHUB_WORKSPACE"
+          while IFS= read -r sha; do
+            msg=$(git log -1 --format=%B "$sha")
+            parent=$(git rev-parse --verify "$sha^" 2>/dev/null || true)
+            [ -z "$parent" ] && { echo "Root commit ${sha}; skipping AUR sync"; continue; }
+
+            # 显式应用该 commit 对 AUR 文件的 patch：apply --check 失败即说明
+            # AUR 上前序状态与 GitHub 不一致（遗漏的 commit 或 AUR 被领先），直接失败退出
+            if ! git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes' \
+                 | git -C /tmp/aur-bettbox-bin apply --check -; then
+              echo "Error: AUR 与 ${sha} 的上游状态不一致，可能有遗漏的 commit 未同步"
+              exit 1
+            fi
+
+            git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes' \
+              | git -C /tmp/aur-bettbox-bin apply -
+            git -C /tmp/aur-bettbox-bin add -A
+            git -C /tmp/aur-bettbox-bin commit -m "$msg"
+            echo "Applied ${sha} to AUR"
+          done < <(git rev-list --reverse "$BEFORE..$AFTER" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+
+          git -C /tmp/aur-bettbox-bin push origin master
+          echo "All commits synced to AUR"

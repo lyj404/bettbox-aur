@@ -152,16 +152,8 @@ jobs:
             title="Update to version ${repo_ver}"
           fi
 
-          # 附上本仓库涉及打包文件的提交记录，提升 AUR 提交的可审计性
-          body=$(git -C "$GITHUB_WORKSPACE" log -20 --format='- %s (%h)' \
-            -- PKGBUILD .SRCINFO restart-bettbox.hook | grep -v '^\- Update to version' || true)
-
           git add PKGBUILD .SRCINFO restart-bettbox.hook
-          if [ -n "$body" ]; then
-            git commit -m "$title" -m "$body"
-          else
-            git commit -m "$title"
-          fi
+          git commit -m "$title"
           git push origin master
 
       - name: Commit and push to GitHub

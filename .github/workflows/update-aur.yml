@@ -95,11 +95,9 @@ jobs:
       - name: Generate .SRCINFO
         if: steps.check.outputs.skip != 'true'
         run: |
-          # makepkg 不允许以 root 运行, 需在容器内创建非 root 用户; 输出由外层 root shell 重定向写入
-          docker run --rm -v "$PWD":/work -w /work archlinux:latest \
-            bash -c 'pacman -Sy --noconfirm pacman-mirrorlist && useradd -m builder && su builder -c "makepkg --printsrcinfo" > .SRCINFO'
-          # 容器以 root 运行,需修正文件所有权
-          sudo chown "$(id -u):$(id -g)" .SRCINFO
+          # 纯 bash 生成 .SRCINFO（无 docker / Arch 容器 / makepkg），
+          # 输出与 `makepkg --printsrcinfo` 字节一致
+          ./.github/mksrcinfo/mksrcinfo.sh "$PWD" > .SRCINFO
 
       # 先推 AUR 再推 GitHub：若推送 AUR 失败，本仓库保持原样，避免两侧 PKGBUILD 内容不同步
       - name: Push to AUR

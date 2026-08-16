@@ -67,6 +67,40 @@ jobs:
             echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
           fi
 
+      # 在 Update PKGBUILD 之前克隆 AUR，把 AUR 打包文件覆盖到本仓库后用 git diff 对比：
+      # 此时本仓库还未被 sed 改写，对比的是两侧"任何改动"而非版本号。
+      # 只要有任何差异（不限版本更新），直接失败任务，交由人工核对，
+      # 避免自动判断合并方向而出错（AUR 领先 / 本地改动尚未同步都可能是原因）
+      - name: Fetch AUR state
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          # 配置 SSH
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+          cat >> ~/.ssh/config <<EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+          EOF
+
+          # 克隆 AUR 仓库供后续推送
+          git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox-bin
+
+          # 覆盖本仓库工作区后再 git diff：任何差异都视为漂移（drift），直接 fail
+          rsync -a --exclude '.git' /tmp/aur-bettbox-bin/ ./
+          if ! git diff --quiet; then
+            echo "Error: AUR 上的打包文件与本仓库不一致，请人工核对并同步后再运行"
+            echo "git diff GitHub..AUR："
+            git diff || true
+            exit 1
+          fi
+
       - name: Update PKGBUILD
         if: steps.check.outputs.skip != 'true'
         env:
@@ -100,42 +134,17 @@ jobs:
           ./.github/mksrcinfo/mksrcinfo.sh "$PWD" > .SRCINFO
 
       # 先推 AUR 再推 GitHub：若推送 AUR 失败，本仓库保持原样，避免两侧 PKGBUILD 内容不同步
+      # 仅在版本更新时（skip=false）推送；skip=true 时两侧已被 Fetch AUR state 校验过，无差异可推
       - name: Push to AUR
+        if: steps.check.outputs.skip != 'true'
         env:
-          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
         run: |
           set -euo pipefail
 
-          # 配置 SSH
-          mkdir -p ~/.ssh
-          echo "$AUR_SSH_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-
-          cat >> ~/.ssh/config <<EOF
-          Host aur.archlinux.org
-            IdentityFile ~/.ssh/aur
-            User aur
-          EOF
-
-          # 克隆 AUR 仓库用于对比与推送
-          git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox
-          cd /tmp/aur-bettbox
+          cd /tmp/aur-bettbox-bin
           git config user.email "${AUR_USERNAME}@users.noreply.github.com"
           git config user.name "$AUR_USERNAME"
-
-          repo_ver=$(sed -n 's/^pkgver=//p' "$GITHUB_WORKSPACE/PKGBUILD")
-          repo_rel=$(sed -n 's/^pkgrel=//p' "$GITHUB_WORKSPACE/PKGBUILD")
-          aur_ver=$(sed -n 's/^pkgver=//p' PKGBUILD)
-          aur_rel=$(sed -n 's/^pkgrel=//p' PKGBUILD)
-
-          # AUR 已领先本仓库时（如上次推送 GitHub 失败），不推送，避免把 AUR 回退
-          if [ "$aur_ver-$aur_rel" != "$repo_ver-$repo_rel" ] && \
-             [ "$(printf '%s\n%s\n' "$aur_ver-$aur_rel" "$repo_ver-$repo_rel" | sort -V | tail -1)" = "$aur_ver-$aur_rel" ]; then
-            echo "AUR ($aur_ver-$aur_rel) is ahead of repo ($repo_ver-$repo_rel), skip to avoid downgrade"
-            exit 0
-          fi
 
           cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/restart-bettbox.hook" ./
 
@@ -144,13 +153,8 @@ jobs:
             exit 0
           fi
 
-          # 定时路径只处理版本更新；skip=true 时若仍有差异（如 push-modifications 推送 AUR 失败后），
-          # 顺手把手工改动补推到 AUR，.SRCINFO 由本地维护者生成并已提交，无需再现场重算
-          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
-            title="Sync packaging changes from GitHub"
-          else
-            title="Update to version ${repo_ver}"
-          fi
+          # 步骤已由 `skip != 'true'` 门控，走到这里必有版本更新
+          title="Update to version $(sed -n 's/^pkgver=//p' PKGBUILD)"
 
           git add PKGBUILD .SRCINFO restart-bettbox.hook
           git commit -m "$title"
@@ -163,19 +167,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 若 AUR 领先（如上次推送 GitHub 失败），以 AUR 为准补回本仓库，保证两侧一致
-          aur_vr=$(sed -n 's/^pkgver=//p' /tmp/aur-bettbox/PKGBUILD)-$(sed -n 's/^pkgrel=//p' /tmp/aur-bettbox/PKGBUILD)
-          repo_vr=$(sed -n 's/^pkgver=//p' PKGBUILD)-$(sed -n 's/^pkgrel=//p' PKGBUILD)
-          if [ "$aur_vr" != "$repo_vr" ] && \
-             [ "$(printf '%s\n%s\n' "$aur_vr" "$repo_vr" | sort -V | tail -1)" = "$aur_vr" ]; then
-            echo "AUR ($aur_vr) is ahead of repo ($repo_vr), syncing GitHub from AUR"
-            cp /tmp/aur-bettbox/PKGBUILD /tmp/aur-bettbox/.SRCINFO /tmp/aur-bettbox/restart-bettbox.hook ./
-            git add PKGBUILD .SRCINFO restart-bettbox.hook
-            git commit -m "Sync from AUR"
-            git push
-            exit 0
-          fi
-
+          # AUR 差异已在 Fetch AUR state 失败，此处只提交本仓库改动
           git add PKGBUILD .SRCINFO restart-bettbox.hook
           if git diff --cached --quiet; then
             echo "No changes to commit on GitHub"
@@ -200,34 +192,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure pkgrel changed
+      - name: Validate PKGBUILD and .SRCINFO consistency
         run: |
           set -euo pipefail
 
           BEFORE="${{ github.event.before }}"
           AFTER="${{ github.event.after }}"
 
-          # Check there is a diff in PKGBUILD or .SRCINFO
-          git diff "$BEFORE" "$AFTER" -- PKGBUILD .SRCINFO > /dev/null 2>&1 || {
-            echo "Error: no changes to PKGBUILD or .SRCINFO in this push"
-            exit 1
-          }
+          # 仅当该 push 实际修改了打包文件（PKGBUILD/.SRCINFO）时做一致性校验；
+          # 只改 LICENSE/README/hook 等其他文件时跳过校验，照常推送到 AUR
+          if ! git diff --quiet "$BEFORE" "$AFTER" -- PKGBUILD .SRCINFO; then
 
-          # Extract the new pkgrel value from each file
-          pkgrel_pkgbuild=$(git diff "$BEFORE" "$AFTER" -- PKGBUILD | sed -n 's/^+pkgrel=//p')
-          pkgrel_srcinfo=$(git diff "$BEFORE" "$AFTER" -- .SRCINFO | sed -n 's/^+[[:space:]]*pkgrel[[:space:]]*=[[:space:]]*//p')
+            # 用仓库内 vendored 纯 bash 生成器从当前 PKGBUILD 现场生成 .SRCINFO，
+            # 与提交的 .SRCINFO 做内容 diff，而非依赖 pkgrel 是否递增
+            ./.github/mksrcinfo/mksrcinfo.sh "$PWD" > /tmp/expected.SRCINFO
+            if ! diff -q .SRCINFO /tmp/expected.SRCINFO >/dev/null 2>&1; then
+              echo "Error: .SRCINFO 与当前 PKGBUILD 不一致，请重新生成并提交："
+              echo "  ./.github/mksrcinfo/mksrcinfo.sh \"\$PWD\" > .SRCINFO"
+              echo "内容差异："
+              diff -u .SRCINFO /tmp/expected.SRCINFO | head -40 || true
+              exit 1
+            fi
 
-          # Verify both files modified pkgrel
-          [ -n "$pkgrel_pkgbuild" ] || { echo "Error: pkgrel not modified in PKGBUILD"; exit 1; }
-          [ -n "$pkgrel_srcinfo" ] || { echo "Error: pkgrel not modified in .SRCINFO"; exit 1; }
+            # 仅提示（不做强制）：打包内容影响产物时应递增 pkgrel，便于 AUR 触发更新
+            new_vr=$(sed -n 's/^pkgver=//p' PKGBUILD)-$(sed -n 's/^pkgrel=//p' PKGBUILD)
+            old_vr=$(git show "$BEFORE:PKGBUILD" | sed -n 's/^pkgver=//p')-$(git show "$BEFORE:PKGBUILD" | sed -n 's/^pkgrel=//p')
+            if [ "$new_vr" = "$old_vr" ]; then
+              echo "Hint: pkgver-pkgrel 未变化。若打包改动影响产物，建议按 Arch wiki 递增 pkgrel"
+            fi
 
-          # Verify they match
-          [ "$pkgrel_pkgbuild" = "$pkgrel_srcinfo" ] || {
-            echo "Error: pkgrel mismatch - PKGBUILD has '$pkgrel_pkgbuild', .SRCINFO has '$pkgrel_srcinfo'"
-            exit 1
-          }
-
-          echo "pkgrel consistency check passed: pkgrel=$pkgrel_pkgbuild"
+            echo "PKGBUILD / .SRCINFO consistency check passed"
+          else
+            # 非打包文件改动（LICENSE/README/hook 等）：无需重新生成 .SRCINFO，
+            # push-to-aur 会全量 rsync 推送，保持 AUR 与仓库一致
+            echo "No changes to PKGBUILD or .SRCINFO, skipping validation"
+          fi
 
       - name: Push to AUR
         uses: ./.github/actions/push-to-aur

@@ -95,14 +95,22 @@ jobs:
           # 克隆 AUR 仓库供后续推送
           git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox-bin
 
-          # 覆盖本仓库工作区后再 git diff：任何差异都视为漂移（drift），直接 fail
-          rsync -a --exclude '.git' /tmp/aur-bettbox-bin/ ./
-          if ! git diff --quiet; then
+          # 与手动工作流 sync-aur-manual.yml 的 Detect drift 同款检测：
+          # --delete 使工作区精确还原为 AUR 内容，可检测 AUR 删除某个打包文件的漂移；
+          # 代价是 GitHub 独有的 README/.github 等也会被删除，故 git add -A 后需用黑名单
+          # 限定 diff，排除这些"删除"造成的误报。
+          # 只要有差异（不限版本更新）即视为漂移（drift），直接 fail 交由人工核对
+          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+          rsync -a --delete --exclude '.git' /tmp/aur-bettbox-bin/ ./
+          git add -A
+          if ! git diff --cached --quiet -- . $EXCLUDE; then
             echo "Error: AUR 上的打包文件与本仓库不一致，请人工核对并同步后再运行"
             echo "git diff GitHub..AUR："
-            git diff || true
+            git diff --cached -- . $EXCLUDE || true
             exit 1
           fi
+          # --delete 影响了工作区（README/.github 被删），用 --hard 连同 index 一并恢复
+          git reset --hard -q HEAD
 
       - name: Update PKGBUILD
         if: steps.check.outputs.skip != 'true'

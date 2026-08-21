@@ -1,0 +1,187 @@
+name: Manual AUR sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: 同步方向：github-to-aur 补回 GitHub 侧尚未同步到 AUR 的 commits；aur-to-github 把 AUR 上领先的 commits 同步回 GitHub
+        required: true
+        default: github-to-aur
+        type: choice
+        options:
+          - github-to-aur
+          - aur-to-github
+
+# 与自动同步共用同一 concurrency group，手动运行时不与定时任务交错
+concurrency:
+  group: update-aur
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone AUR and configure SSH
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p -m 0700 ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          git config --global user.name "${{ secrets.AUR_USERNAME }}"
+          git config --global user.email "${{ secrets.AUR_USERNAME }}@users.noreply.github.com"
+
+          rm -rf /tmp/aur-bettbox-bin
+          git clone "ssh://aur@aur.archlinux.org/bettbox-bin.git" /tmp/aur-bettbox-bin
+
+      # 先做 Fetch AUR state 同款检测：rsync --delete 覆盖工作区后 git diff。
+      # 若两侧打包文件一致，说明无遗漏，提前退出；有差异则进入逐 commit 对齐
+      - name: Detect drift
+        run: |
+          set -euo pipefail
+
+          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+
+          # --delete 使工作区精确还原为 AUR 内容：可检测到 AUR 删除某个打包文件的漂移；
+          # 代价是 GitHub 独有的 README/.github 等也会被删除，故 git add -A 后需用黑名单
+          # 限定 diff，排除这些"删除"造成的误报
+          rsync -a --delete --exclude '.git' /tmp/aur-bettbox-bin/ ./
+          git add -A
+          if git diff --cached --quiet -- . $EXCLUDE; then
+            echo "GitHub 与 AUR 打包文件一致，无需同步"
+            echo "drift=false" >> "$GITHUB_ENV"
+          else
+            echo "检测到漂移：GH 与 AUR 打包文件不一致"
+            echo "drift=true" >> "$GITHUB_ENV"
+          fi
+          # --delete 影响了工作区（README/.github 被删），用 --hard 连同 index 一并恢复
+          git reset --hard -q HEAD
+
+      # github-to-aur：GitHub 历史中定位基线（AUR 当前打包内容对应的 commit），
+      # 基线之后的涉及打包文件的 commits 即为遗漏段，逐条 apply + commit 到 AUR。
+      # 基线无法定位（AUR 领先/漂移）或任一步 apply 失败都报错退出，不做整体覆盖
+      - name: Sync GitHub -> AUR (per commit, baseline-based)
+        if: ${{ env.drift == 'true' && github.event.inputs.direction == 'github-to-aur' }}
+        run: |
+          set -euo pipefail
+
+          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+
+          # 从最新 commit 往回找与 AUR 当前内容完全一致的 commit = 基线。
+          # 对称做法：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其对象可达，
+          # git diff --quiet <sha> aur-sync 树到树比较（同仓库），天然覆盖任一侧新增/删除/修改
+          aur_ref="refs/heads/aur-sync"
+          git fetch /tmp/aur-bettbox-bin master:"$aur_ref"
+          baseline=""
+          while IFS= read -r sha; do
+            if git diff --quiet "$sha" "$aur_ref" -- . $EXCLUDE 2>/dev/null; then
+              baseline="$sha"
+              break
+            fi
+          done < <(git rev-list HEAD)
+
+          if [ -z "$baseline" ]; then
+            echo "Error: AUR 当前内容在 GitHub 历史中无匹配 commit（AUR 可能领先或在 GitHub 上有未提交改动）"
+            echo "建议先运行 aur-to-github 方向，或人工核对"
+            exit 1
+          fi
+          echo "基线 commit: $(git log -1 --format='%h %s' "$baseline")"
+
+          # 基线之后涉及打包文件的 commits，正序（旧→新）
+          mapfile -t shas < <(git rev-list --reverse "$baseline..HEAD" -- . $EXCLUDE)
+          if [ "${#shas[@]}" -eq 0 ]; then
+            echo "基线之后无遗漏 commit，无需同步"
+            exit 0
+          fi
+
+          for sha in "${shas[@]}"; do
+            parent=$(git rev-parse --verify "$sha^" 2>/dev/null || true)
+            [ -z "$parent" ] && { echo "Root commit ${sha}; skipping"; exit 1; }
+
+            echo "Syncing ${sha} -> AUR: $(git log -1 --format=%s "$sha")"
+            if ! git diff "$parent" "$sha" -- . $EXCLUDE \
+                 | git -C /tmp/aur-bettbox-bin apply --check -; then
+              echo "Error: 该 commit 无法干净应用到 AUR，请人工核对"
+              exit 1
+            fi
+            git diff "$parent" "$sha" -- . $EXCLUDE \
+              | git -C /tmp/aur-bettbox-bin apply -
+            git -C /tmp/aur-bettbox-bin add -A
+            git -C /tmp/aur-bettbox-bin commit -m "$(git log -1 --format=%B "$sha")"
+          done
+
+          git -C /tmp/aur-bettbox-bin push origin master
+          echo "All commits synced to AUR"
+
+      # aur-to-github：AUR 历史中定位基线（GitHub 当前打包内容对应的 commit），
+      # 基线之后的 AUR commits 即为领先段，逐条 apply + commit 到 GitHub 工作区
+      - name: Sync AUR -> GitHub (per commit, baseline-based)
+        if: ${{ env.drift == 'true' && github.event.inputs.direction == 'aur-to-github' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+
+          # 反向：从最新 commit 往回找与 GitHub HEAD 当前内容完全一致的 AUR commit = 基线。
+          # 简化：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其 commit 对象可达，
+          # git diff --quiet HEAD <sha> 直接做树到树比较（同仓库），天然覆盖任一侧新增/删除/修改
+          aur_ref="refs/heads/aur-sync"
+          git fetch /tmp/aur-bettbox-bin master:"$aur_ref"
+          baseline=""
+          while IFS= read -r sha; do
+            # 黑名单 pathspec 限定：忽略 GitHub 独有的 README/.github 等非 AUR 文件
+            if git diff --quiet HEAD "$sha" -- . $EXCLUDE 2>/dev/null; then
+              baseline="$sha"
+              break
+            fi
+          done < <(git rev-list "$aur_ref")
+
+          if [ -z "$baseline" ]; then
+            echo "Error: GitHub 当前内容在 AUR 历史中无匹配 commit（GitHub 可能领先或在 AUR 上有未提交改动）"
+            echo "建议先运行 github-to-aur 方向，或人工核对"
+            exit 1
+          fi
+          echo "基线 commit: $(git log -1 --format='%h %s' "$baseline")"
+
+          # 基线之后 AUR 上的 commits，正序（旧→新）；AUR 只含打包文件，全量列出
+          mapfile -t shas < <(git rev-list --reverse "$baseline..$aur_ref")
+          if [ "${#shas[@]}" -eq 0 ]; then
+            echo "基线之后无领先 commit，无需同步"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for sha in "${shas[@]}"; do
+            parent=$(git rev-parse --verify "$sha^" 2>/dev/null || true)
+            [ -z "$parent" ] && { echo "Root commit ${sha}; skipping"; exit 1; }
+
+            echo "Syncing ${sha} -> GitHub: $(git log -1 --format=%s "$sha")"
+            # AUR 侧 diff 全量（AUR 只含打包文件，无需黑名单）；应用到 GitHub 工作区
+            if ! git diff "$parent" "$sha" \
+                 | git apply --check -; then
+              echo "Error: 该 commit 无法干净应用到 GitHub 工作区，请人工核对"
+              exit 1
+            fi
+            git diff "$parent" "$sha" \
+              | git apply -
+            git add -A
+            git commit -m "$(git log -1 --format=%B "$sha")"
+          done
+
+          git push
+          echo "All commits synced to GitHub"

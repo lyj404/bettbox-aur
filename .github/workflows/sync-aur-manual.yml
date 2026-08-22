@@ -51,14 +51,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
 
           # --delete 使工作区精确还原为 AUR 内容：可检测到 AUR 删除某个打包文件的漂移；
           # 代价是 GitHub 独有的 README/.github 等也会被删除，故 git add -A 后需用黑名单
           # 限定 diff，排除这些"删除"造成的误报
           rsync -a --delete --exclude '.git' /tmp/aur-bettbox-bin/ ./
           git add -A
-          if git diff --cached --quiet -- . $EXCLUDE; then
+          if git diff --cached --quiet -- . "${EXCLUDE[@]}"; then
             echo "GitHub 与 AUR 打包文件一致，无需同步"
             echo "drift=false" >> "$GITHUB_ENV"
           else
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
 
           # 从最新 commit 往回找与 AUR 当前内容完全一致的 commit = 基线。
           # 对称做法：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其对象可达，
@@ -85,7 +85,7 @@ jobs:
           git fetch /tmp/aur-bettbox-bin master:"$aur_ref"
           baseline=""
           while IFS= read -r sha; do
-            if git diff --quiet "$sha" "$aur_ref" -- . $EXCLUDE 2>/dev/null; then
+            if git diff --quiet "$sha" "$aur_ref" -- . "${EXCLUDE[@]}" 2>/dev/null; then
               baseline="$sha"
               break
             fi
@@ -99,7 +99,7 @@ jobs:
           echo "基线 commit: $(git log -1 --format='%h %s' "$baseline")"
 
           # 基线之后涉及打包文件的 commits，正序（旧→新）
-          mapfile -t shas < <(git rev-list --reverse "$baseline..HEAD" -- . $EXCLUDE)
+          mapfile -t shas < <(git rev-list --reverse "$baseline..HEAD" -- . "${EXCLUDE[@]}")
           if [ "${#shas[@]}" -eq 0 ]; then
             echo "基线之后无遗漏 commit，无需同步"
             exit 0
@@ -110,12 +110,12 @@ jobs:
             [ -z "$parent" ] && { echo "Root commit ${sha}; skipping"; exit 1; }
 
             echo "Syncing ${sha} -> AUR: $(git log -1 --format=%s "$sha")"
-            if ! git diff "$parent" "$sha" -- . $EXCLUDE \
+            if ! git diff "$parent" "$sha" -- . "${EXCLUDE[@]}" \
                  | git -C /tmp/aur-bettbox-bin apply --check -; then
               echo "Error: 该 commit 无法干净应用到 AUR，请人工核对"
               exit 1
             fi
-            git diff "$parent" "$sha" -- . $EXCLUDE \
+            git diff "$parent" "$sha" -- . "${EXCLUDE[@]}" \
               | git -C /tmp/aur-bettbox-bin apply -
             git -C /tmp/aur-bettbox-bin add -A
             git -C /tmp/aur-bettbox-bin commit -m "$(git log -1 --format=%B "$sha")"
@@ -133,7 +133,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes'
+          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
 
           # 反向：从最新 commit 往回找与 GitHub HEAD 当前内容完全一致的 AUR commit = 基线。
           # 简化：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其 commit 对象可达，
@@ -143,7 +143,7 @@ jobs:
           baseline=""
           while IFS= read -r sha; do
             # 黑名单 pathspec 限定：忽略 GitHub 独有的 README/.github 等非 AUR 文件
-            if git diff --quiet HEAD "$sha" -- . $EXCLUDE 2>/dev/null; then
+            if git diff --quiet HEAD "$sha" -- . "${EXCLUDE[@]}" 2>/dev/null; then
               baseline="$sha"
               break
             fi

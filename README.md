@@ -22,6 +22,14 @@ makepkg -si
 
 ## 常见问题
 
+### TUN 模式的权限机制（v1.19.5 起）
+
+自 v1.19.5 起，Bettbox 弃用 setuid，改为 setcap + polkit 规则提权：
+
+- 安装/升级时由 [bettbox.install](bettbox.install) 为 `BettboxCore` 设置文件 capabilities（`cap_net_admin,cap_net_bind_service,cap_net_raw`），`setcap` 由 `libcap` 提供；
+- polkit 规则（`99-bettbox.rules`）作为**包内容**安装到 `/usr/share/polkit-1/rules.d/`，用于开启 TUN 后免密调用 `resolvectl` 修改系统 DNS；需要 `polkit`（可选依赖），未安装时无法使用系统 DNS 授权功能；
+- 规则不通过安装脚本动态写入 polkit 的 `rules.d`（上游 deb 的做法）——脚本写入的文件不进包清单，属于"无主"文件，`pacman -Qkk`、校验工具均不可见，绕过卸载路径时会残留一条免密规则（上游已通过 [PR #539](https://github.com/appshubcc/Bettbox/pull/539) 修复 deb/rpm 的同类问题）。
+
 ### 安装失败：缺少 libkeybinder3 依赖
 
 如果安装时提示缺少 `libkeybinder3` 依赖，可以尝试以下方法：

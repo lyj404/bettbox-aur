@@ -157,9 +157,9 @@ jobs:
           git config user.email "${AUR_USERNAME}@users.noreply.github.com"
           git config user.name "$AUR_USERNAME"
 
-          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/restart-bettbox.hook" "$GITHUB_WORKSPACE/bettbox.install" "$GITHUB_WORKSPACE/99-bettbox.rules" ./
+          cp "$GITHUB_WORKSPACE/PKGBUILD" "$GITHUB_WORKSPACE/.SRCINFO" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/restart-bettbox.hook" "$GITHUB_WORKSPACE/bettbox.install" ./
 
-          if git diff --quiet -- PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install 99-bettbox.rules; then
+          if git diff --quiet -- PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install; then
             echo "No changes to sync to AUR"
             exit 0
           fi
@@ -167,7 +167,7 @@ jobs:
           # 步骤已由 `skip != 'true'` 门控，走到这里必有版本更新
           title="Update to version $(sed -n 's/^pkgver=//p' PKGBUILD)"
 
-          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install 99-bettbox.rules
+          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install
           git commit -m "$title"
           git push origin master
 
@@ -179,7 +179,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # AUR 差异已在 Fetch AUR state 失败，此处只提交本仓库改动
-          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install 99-bettbox.rules
+          git add PKGBUILD .SRCINFO LICENSE restart-bettbox.hook bettbox.install
           if git diff --cached --quiet; then
             echo "No changes to commit on GitHub"
             exit 0

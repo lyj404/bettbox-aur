@@ -100,7 +100,7 @@ jobs:
           # 代价是 GitHub 独有的 README/.github 等也会被删除，故 git add -A 后需用黑名单
           # 限定 diff，排除这些"删除"造成的误报。
           # 只要有差异（不限版本更新）即视为漂移（drift），直接 fail 交由人工核对
-          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+          EXCLUDE=(':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
           rsync -a --delete --exclude '.git' /tmp/aur-bettbox-bin/ ./
           git add -A
           if ! git diff --cached --quiet -- . "${EXCLUDE[@]}"; then
@@ -278,18 +278,18 @@ jobs:
 
             # 显式应用该 commit 对 AUR 文件的 patch：apply --check 失败即说明
             # AUR 上前序状态与 GitHub 不一致（遗漏的 commit 或 AUR 被领先），直接失败退出
-            if ! git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes' \
+            if ! git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes' \
                  | git -C /tmp/aur-bettbox-bin apply --check -; then
               echo "Error: AUR 与 ${sha} 的上游状态不一致，可能有遗漏的 commit 未同步"
               exit 1
             fi
 
-            git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes' \
+            git diff "$parent" "$sha" -- . ':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes' \
               | git -C /tmp/aur-bettbox-bin apply -
             git -C /tmp/aur-bettbox-bin add -A
             git -C /tmp/aur-bettbox-bin commit -m "$msg"
             echo "Applied ${sha} to AUR"
-          done < <(git rev-list --reverse "$BEFORE..$AFTER" -- . ':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+          done < <(git rev-list --reverse "$BEFORE..$AFTER" -- . ':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
 
           git -C /tmp/aur-bettbox-bin push origin master
           echo "All commits synced to AUR"

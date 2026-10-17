@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+          EXCLUDE=(':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
 
           # --delete 使工作区精确还原为 AUR 内容：可检测到 AUR 删除某个打包文件的漂移；
           # 代价是 GitHub 独有的 README/.github 等也会被删除，故 git add -A 后需用黑名单
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+          EXCLUDE=(':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
 
           # 从最新 commit 往回找与 AUR 当前内容完全一致的 commit = 基线。
           # 对称做法：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其对象可达，
@@ -133,7 +133,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXCLUDE=(':!.github/**' ':!README.md' ':!.gitignore' ':!.gitattributes')
+          EXCLUDE=(':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
 
           # 反向：从最新 commit 往回找与 GitHub HEAD 当前内容完全一致的 AUR commit = 基线。
           # 简化：把 AUR 分支 fetch 进本仓库（refs/heads/aur-sync）使其 commit 对象可达，

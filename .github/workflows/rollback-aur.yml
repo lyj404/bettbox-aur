@@ -1,0 +1,130 @@
+name: 手动回退 AUR 版本
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: '目标上游版本（例如 1.19.7，不含 v）'
+        required: true
+        type: string
+      current_version:
+        description: '确认当前 AUR 完整版本（例如 1.19.8-2，包含 epoch）'
+        required: true
+        type: string
+
+concurrency:
+  group: update-aur
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_VERSION: ${{ inputs.target_version }}
+      EXPECTED_VERSION: ${{ inputs.current_version }}
+      AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate inputs and AUR state
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/release-common.sh
+          valid_version "$TARGET_VERSION" || fail '目标版本格式无效'
+          current=$(aur_version)
+          [[ $current == "$EXPECTED_VERSION" ]] || fail "AUR 当前版本为 $current，与输入不符"
+          current_upstream=${current%-*}
+          current_upstream=${current_upstream#*:}
+          valid_version "$current_upstream" || fail "AUR 版本格式无效: $current"
+          [[ $(compare_versions "$TARGET_VERSION" "$current_upstream") == -1 ]] || fail '目标版本必须低于当前版本'
+
+          mkdir -p -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes'
+          git clone ssh://aur@aur.archlinux.org/bettbox-bin.git /tmp/aur-bettbox-bin
+          EXCLUDE=(':!.github/**' ':!README.md' ':!AGENTS.md' ':!.gitignore' ':!.gitattributes')
+          rsync -a --delete --exclude '.git' /tmp/aur-bettbox-bin/ ./
+          git add -A
+          if ! git diff --cached --quiet -- . "${EXCLUDE[@]}"; then
+            git diff --cached -- . "${EXCLUDE[@]}"
+            fail 'AUR 与 GitHub 的打包文件存在漂移，请先同步'
+          fi
+          git reset --hard -q HEAD
+
+      - name: Verify target assets and packaging
+        run: |
+          set -euo pipefail
+          source .github/scripts/release-common.sh
+          get_release "v$TARGET_VERSION" /tmp/bettbox-rollback-release.json || fail '目标 release 不存在'
+          jq -e '.draft == false and .prerelease == false' /tmp/bettbox-rollback-release.json >/dev/null || fail '目标 release 不是稳定版本'
+          release_assets /tmp/bettbox-rollback-release.json "$TARGET_VERSION" || fail '目标版本的双架构资产或 SHA-256 不完整'
+          for arch in amd64 arm64; do
+            file="/tmp/bettbox-${arch}.deb"
+            curl -fLsS --retry 3 -o "$file" "https://github.com/appshubcc/Bettbox/releases/download/v${TARGET_VERSION}/Bettbox-${TARGET_VERSION}-linux-${arch}.deb"
+            if [[ $arch == amd64 ]]; then expected=$SHA_AMD64; else expected=$SHA_ARM64; fi
+            printf '%s  %s\n' "$expected" "$file" | sha256sum -c -
+            # Exercise the current package() against each actual deb before publishing.
+            docker run --rm -v "$PWD:/repo:ro" -v "$file:/input.deb:ro" archlinux:base bash -euc '
+              mkdir -p /work/src /work/pkg
+              cd /work/src
+              bsdtar -xf /input.deb
+              cp /repo/restart-bettbox.hook /repo/bettbox.install /work/src/
+              source /repo/PKGBUILD
+              srcdir=/work/src pkgdir=/work/pkg
+              package
+            '
+          done
+          printf 'SHA_AMD64=%s\nSHA_ARM64=%s\n' "$SHA_AMD64" "$SHA_ARM64" >> "$GITHUB_ENV"
+
+      - name: Prepare rollback
+        run: |
+          set -euo pipefail
+          source .github/scripts/release-common.sh
+          # Refuse to publish if the approved state changed during the download.
+          [[ $(aur_version) == "$EXPECTED_VERSION" ]] || fail 'AUR 版本已变化，请重新确认'
+          git fetch origin main
+          [[ $(git rev-parse HEAD) == $(git rev-parse FETCH_HEAD) ]] || fail 'GitHub main 已变化，请重新确认'
+          old_epoch=$(sed -n 's/^epoch=//p' PKGBUILD)
+          old_epoch=${old_epoch:-0}
+          [[ $old_epoch =~ ^(0|[1-9][0-9]*)$ && ${#old_epoch} -lt 9 ]] || fail 'epoch 格式无效'
+          new_epoch=$((old_epoch + 1))
+          if grep -q '^epoch=' PKGBUILD; then
+            sed -i "s/^epoch=.*/epoch=$new_epoch/" PKGBUILD
+          else
+            sed -i "/^pkgver=/i epoch=$new_epoch" PKGBUILD
+          fi
+          sed -i "s|^pkgver=.*|pkgver=$TARGET_VERSION|; s|^pkgrel=.*|pkgrel=1|" PKGBUILD
+          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('$SHA_AMD64')|" PKGBUILD
+          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('$SHA_ARM64')|" PKGBUILD
+          bash -n PKGBUILD
+          ./.github/mksrcinfo/mksrcinfo.sh "$PWD" > .SRCINFO
+          git diff -- PKGBUILD .SRCINFO
+          echo "NEW_VERSION=$new_epoch:$TARGET_VERSION-1" >> "$GITHUB_ENV"
+
+      - name: Push to AUR then GitHub
+        run: |
+          set -euo pipefail
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes'
+          title="fix: 回退至上游版本 $TARGET_VERSION"
+          body="epoch 递增、pkgrel 重置为 1，回退自 $EXPECTED_VERSION 至 $NEW_VERSION。"
+          cp PKGBUILD .SRCINFO /tmp/aur-bettbox-bin/
+          git -C /tmp/aur-bettbox-bin config user.name "$AUR_USERNAME"
+          git -C /tmp/aur-bettbox-bin config user.email "${AUR_USERNAME}@users.noreply.github.com"
+          git -C /tmp/aur-bettbox-bin add PKGBUILD .SRCINFO
+          git -C /tmp/aur-bettbox-bin commit -m "$title" -m "$body"
+          git -C /tmp/aur-bettbox-bin push origin master
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          git commit -m "$title" -m "$body"
+          git push origin HEAD:main

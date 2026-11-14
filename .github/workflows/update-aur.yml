@@ -31,44 +31,7 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          latest_tag=""
-          while IFS= read -r tag; do
-            case "$tag" in *-*) continue ;; esac
-            asset_count=$(gh release view "$tag" \
-              --repo appshubcc/Bettbox \
-              --json assets \
-              --jq '[.assets[] | select(.name | test("linux-amd64\\.deb$"))] | length')
-            if [ "$asset_count" -gt 0 ]; then
-              latest_tag="$tag"
-              break
-            fi
-          done < <(gh release list \
-            --repo appshubcc/Bettbox \
-            --limit 30 \
-            --json tagName,isDraft \
-            --jq '.[] | select(.isDraft == false) | .tagName')
-
-          if [ -z "$latest_tag" ]; then
-            echo "No upstream stable releases found"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          latest_ver="${latest_tag#v}"
-          # 以 AUR 上已发布的版本为准，避免推送 AUR 失败后被本仓库的 pkgver 卡住
-          current_ver=$(curl -fsS 'https://aur.archlinux.org/rpc/v5/info?arg[]=bettbox-bin' \
-            | jq -r '.results[0].Version' | sed 's/-[^-]*$//')
-
-          if [[ "$latest_ver" == "$current_ver" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "version=$latest_ver" >> "$GITHUB_OUTPUT"
-            echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash .github/scripts/check-release.sh
 
       # 在 Update PKGBUILD 之前克隆 AUR，把 AUR 打包文件覆盖到本仓库后用 git diff 对比：
       # 此时本仓库还未被 sed 改写，对比的是两侧"任何改动"而非版本号。
@@ -121,21 +84,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          sha_amd64=$(gh release view "$TAG" \
-            --repo appshubcc/Bettbox \
-            --json assets \
-            --jq '[.assets[] | select(.name | endswith("linux-amd64.deb")) | .digest] | first' | \
-            sed 's/^sha256://')
-          sha_arm64=$(gh release view "$TAG" \
-            --repo appshubcc/Bettbox \
-            --json assets \
-            --jq '[.assets[] | select(.name | endswith("linux-arm64.deb")) | .digest] | first' | \
-            sed 's/^sha256://')
+          source .github/scripts/release-common.sh
+          get_release "$TAG" /tmp/bettbox-update-release.json || fail "Release $TAG disappeared"
+          release_assets /tmp/bettbox-update-release.json "$NEW_VER" || fail "Release assets are incomplete"
 
           sed -i "s|^pkgver=.*|pkgver=${NEW_VER}|" PKGBUILD
           sed -i "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
-          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${sha_amd64}')|" PKGBUILD
-          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${sha_arm64}')|" PKGBUILD
+          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${SHA_AMD64}')|" PKGBUILD
+          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${SHA_ARM64}')|" PKGBUILD
 
       - name: Generate .SRCINFO
         if: steps.check.outputs.skip != 'true'

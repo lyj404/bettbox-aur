@@ -22,6 +22,16 @@ makepkg -si
 
 ## 常见问题
 
+### 上游撤回版本时如何回退 AUR 包
+
+自动更新每 6 小时检查 AUR 当前版本的 release 和两个架构的 deb；缺失资产、缺少 SHA-256 或上游候选版本低于 AUR 时，任务会失败并在 Actions 摘要中提示，不会自动回退。GitHub API 或 AUR 查询失败也会停止任务；失败通知取决于仓库和账号的 GitHub 通知设置。
+
+确认上游撤包且需要回退后，在仓库 **Actions → 手动回退 AUR 版本 → Run workflow** 中选择 `main`，填写目标版本（如 `1.19.7`）和 AUR 页面上的当前完整版本（如 `1.19.8-2`，有 epoch 时包含 `1:`），然后运行。启动工作流即表示维护者已确认回退。若无可用旧版双架构 deb，不能使用该流程。
+
+工作流会重新检查版本与 AUR 漂移，下载并校验两个 deb，在 Arch 容器内用当前 `package()` 检查它们的布局，再递增 epoch、更新版本和校验和、生成 `.SRCINFO`，依次推送 AUR 和 GitHub。旧版即使通过布局检查，也仍需维护者核实其功能及是否适合回退。用户需要通过 AUR 助手检查更新并安装，才会收到回退版本。
+
+如果 AUR 推送成功而 GitHub 推送失败，先核对两边状态，再用 **Manual AUR sync** 的 `aur-to-github` 方向同步，或人工处理漂移；不要重复执行回退。需要配置现有的 `AUR_SSH_KEY`、`AUR_USERNAME` secrets，并允许 Actions 写入仓库。
+
 ### TUN 模式的权限机制（v1.19.5 起）
 
 自 v1.19.5 起，Bettbox 弃用 setuid，改为 setcap + polkit 规则提权：
